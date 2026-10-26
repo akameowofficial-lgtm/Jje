@@ -1,7 +1,6 @@
 name: Virtual Machine
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: windows-latest
@@ -11,7 +10,6 @@ jobs:
       - name: 0. Unlock Performance + Enable RDP + AnyDesk
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           reg add "HKEY_CURRENT_USER\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9012038010000000 /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v DisableLockWorkstation /t REG_DWORD /d 1 /f
@@ -23,26 +21,22 @@ jobs:
           powercfg /change monitor-timeout-ac 0
           powercfg /change hibernate-timeout-ac 0
           powercfg /change disk-timeout-ac 0
-
+          
           curl.exe -L -o vc_redist.x64.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
           Start-Process ./vc_redist.x64.exe -ArgumentList "/install /quiet /norestart" -Wait
-
+          
           curl.exe -L -o anydesk.exe https://download.anydesk.com/AnyDesk.exe
           Start-Process ./anydesk.exe -ArgumentList "--install C:\AnyDesk --start-with-win --silent" -Wait
-
-          # Windows edition: Server 2025 shares build 26100 with Windows 11 24H2,
-          # so claim Windows 11 Pro / 24H2 for a consistent story.
+          
           $cv = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-          Set-ItemProperty $cv -Name "ProductName"               -Value "Windows 11 Pro"
-          Set-ItemProperty $cv -Name "EditionID"                 -Value "Professional"
-          Set-ItemProperty $cv -Name "CompositionEditionID"      -Value "Professional"
-          Set-ItemProperty $cv -Name "CurrentBuildNumber"        -Value "26100"
-          Set-ItemProperty $cv -Name "DisplayVersion"            -Value "24H2"
-          Set-ItemProperty $cv -Name "CurrentMajorVersionNumber" -Value 10 -Type DWord
-          Set-ItemProperty $cv -Name "CurrentMinorVersionNumber" -Value 0  -Type DWord
-          Set-ItemProperty $cv -Name "CurrentVersion"            -Value "10.0"
-          Set-ItemProperty $cv -Name "RegisteredOwner"           -Value "Aarav Sharma"
-
+          Set-ItemProperty -Path $cv -Name "ProductName"              -Value "Windows 10 Pro"
+          Set-ItemProperty -Path $cv -Name "EditionID"                -Value "Professional"
+          Set-ItemProperty -Path $cv -Name "CompositionEditionID"     -Value "Professional"
+          Set-ItemProperty -Path $cv -Name "CurrentBuildNumber"       -Value "19045"
+          Set-ItemProperty -Path $cv -Name "CurrentMajorVersionNumber" -Value 10 -Type DWord
+          Set-ItemProperty -Path $cv -Name "CurrentMinorVersionNumber" -Value 0  -Type DWord
+          Set-ItemProperty -Path $cv -Name "CurrentVersion"           -Value "10.0"
+          
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           $rdpTcp = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
           Set-ItemProperty -Path $rdpTcp -Name "UserAuthentication" -Value 0
@@ -54,15 +48,12 @@ jobs:
           Start-Sleep   -Seconds 2
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           netsh advfirewall firewall add rule name="RDP-3389" protocol=TCP dir=in localport=3389 action=allow
-
+          
           net user runneradmin "GitHub@2026"
           net localgroup "Remote Desktop Users" "runneradmin" /add
-
-          try {
-            $release = Invoke-RestMethod "https://api.github.com/repos/ekzhang/bore/releases/latest" -ErrorAction Stop
-            $asset = $release.assets | Where-Object { $_.name -like "*x86_64*windows*" } | Select-Object -First 1
-          } catch { $asset = $null }
-
+          
+          $release = Invoke-RestMethod "https://api.github.com/repos/ekzhang/bore/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*x86_64*windows*" } | Select-Object -First 1
           if (-not $asset) {
             curl.exe -L -o "C:\bore.zip" "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
           } else {
@@ -72,164 +63,13 @@ jobs:
           $boreExe = Get-ChildItem "C:\bore" -Recurse -Filter "bore.exe" | Select-Object -First 1 -ExpandProperty FullName
           Copy-Item $boreExe "C:\bore.exe" -Force
 
-      # ── STEP 0.5: HARDWARE IDENTITY MASK ──────────────────────────────
-      - name: 0.5 Hardware Identity Mask
-        shell: pwsh
-        run: |
-          # GitHub's pwsh wrapper sets $ErrorActionPreference='stop', so a single
-          # denied registry key aborts the job. Relax it and handle errors inline.
-          $ErrorActionPreference = 'Continue'
-          Write-Host "=== Applying anti-VM mask ===" -ForegroundColor Cyan
-
-          function Edit-ClassKey {
-            param([string]$ClassGuid, [string]$Match, [hashtable]$Values)
-            $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-                      "SYSTEM\CurrentControlSet\Control\Class\$ClassGuid")
-            if (-not $root) { Write-Host "  class $ClassGuid not found"; return }
-            foreach ($sub in $root.GetSubKeyNames()) {
-              if ($sub -notmatch '^\d{4}$') { continue }
-              try {
-                $sk = $root.OpenSubKey($sub, $true)
-                if (-not $sk) { continue }
-                $d = [string]$sk.GetValue('DriverDesc')
-                if ($d -and $d -match $Match) {
-                  foreach ($n in $Values.Keys) { $sk.SetValue($n, $Values[$n]) }
-                  Write-Host "  patched: $d" -ForegroundColor Green
-                }
-                $sk.Close()
-              } catch { Write-Host "  skipped $sub" -ForegroundColor DarkGray }
-            }
-            $root.Close()
-          }
-
-          function Remove-ClassValue {
-            param([string]$ClassGuid, [string]$Name)
-            $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-                      "SYSTEM\CurrentControlSet\Control\Class\$ClassGuid")
-            if (-not $root) { return }
-            foreach ($sub in $root.GetSubKeyNames()) {
-              if ($sub -notmatch '^\d{4}$') { continue }
-              try {
-                $sk = $root.OpenSubKey($sub, $true)
-                if ($sk) { $sk.DeleteValue($Name, $false); $sk.Close() }
-              } catch {}
-            }
-            $root.Close()
-          }
-
-          # ---------- A. SMBIOS copies (some apps read these directly) ----------
-          $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\SystemInformation'
-          @{ SystemManufacturer='ASUSTeK COMPUTER INC.'; SystemProductName='ROG STRIX G15 G513QM'
-             SystemVersion='1.0'; SystemSKU='G513QM'
-             BIOSVersion='G513QM.312'; BIOSReleaseDate='05/12/2021'
-             BaseBoardManufacturer='ASUSTeK COMPUTER INC.'; BaseBoardProduct='G513QM'; BaseBoardVersion='1.0'
-          }.GetEnumerator() | ForEach-Object { Set-ItemProperty $k $_.Key $_.Value -Force -ErrorAction SilentlyContinue }
-          Set-ItemProperty $k InformationSource 1 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          $h = 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS'
-          @{ SystemManufacturer='ASUSTeK COMPUTER INC.'; SystemProductName='ROG STRIX G15 G513QM'
-             SystemVersion='1.0'; SystemSKU='G513QM'
-             BIOSVendor='American Megatrends Inc.'; BIOSVersion='G513QM.312'; BIOSReleaseDate='05/12/2021'
-             BaseBoardManufacturer='ASUSTeK COMPUTER INC.'; BaseBoardProduct='G513QM'; BaseBoardVersion='1.0'
-          }.GetEnumerator() | ForEach-Object {
-            if (Test-Path $h) { Set-ItemProperty $h $_.Key $_.Value -Force -ErrorAction SilentlyContinue }
-          }
-
-          $oem = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
-          New-Item $oem -Force -ErrorAction SilentlyContinue | Out-Null
-          Set-ItemProperty $oem Manufacturer 'ASUSTeK COMPUTER INC.' -ErrorAction SilentlyContinue
-          Set-ItemProperty $oem Model        'ROG STRIX G15 G513QM'   -ErrorAction SilentlyContinue
-          Set-ItemProperty $oem SupportHours '24/7'                   -ErrorAction SilentlyContinue
-
-          # ---------- B. CPU name (EPYC 7763 appears in zero consumer PCs) ----------
-          Set-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' `
-            ProcessorNameString 'AMD Ryzen 7 5800H with Radeon Graphics' -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' `
-            VendorIdentifier 'AuthenticAMD' -Force -ErrorAction SilentlyContinue
-
-          # ---------- C. GPU / D. Disk ----------
-          Edit-ClassKey '4d36e968-e325-11ce-bfc1-08002be10318' 'Basic Display|Hyper-V Video' `
-                        @{ DriverDesc='NVIDIA GeForce RTX 3060 Laptop GPU' }
-          Edit-ClassKey '4d36e967-e325-11ce-bfc1-08002be10318' 'Virtual Disk' `
-                        @{ DriverDesc='Samsung SSD 980 PRO 1TB' }
-
-          # ---------- E. MAC -> real vendor OUI ----------
-          $nicClass = '4d36e972-e325-11ce-bfc1-08002be10318'
-          $mac = 'A4BB6D' + ('{0:X2}{1:X2}{2:X2}' -f (Get-Random -Maximum 256),(Get-Random -Maximum 256),(Get-Random -Maximum 256))
-          Edit-ClassKey $nicClass 'Hyper-V|Mellanox' @{ NetworkAddress=$mac }
-
-          Get-NetAdapter -ErrorAction SilentlyContinue |
-            Where-Object { $_.InterfaceDescription -match 'Hyper-V|Mellanox' } |
-            Restart-NetAdapter -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 20
-
-          if (Test-Connection 8.8.8.8 -Count 2 -Quiet) {
-            Write-Host "  MAC set to $mac" -ForegroundColor Green
-          } else {
-            Write-Host "  MAC broke connectivity - reverting" -ForegroundColor Yellow
-            Remove-ClassValue $nicClass 'NetworkAddress'
-            Get-NetAdapter -ErrorAction SilentlyContinue | Restart-NetAdapter -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 20
-          }
-
-          # ---------- F. Machine GUID ----------
-          Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' MachineGuid ([guid]::NewGuid().ToString()) -Force -ErrorAction SilentlyContinue
-
-          # ---------- G. Computer name (fv-az###-### is an Azure tell) ----------
-          $name = 'DESKTOP-' + (-join ((65..90)+(48..57) | Get-Random -Count 7 | ForEach-Object {[char]$_}))
-          Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName'       ComputerName $name -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' ComputerName $name -Force -ErrorAction SilentlyContinue
-          Write-Host "  computer name -> $name (fully applies after reboot)"
-
-          # ---------- H. Strip 'Microsoft Hyper-V' from device names ----------
-          foreach ($dev in (Get-PnpDevice -ErrorAction SilentlyContinue |
-                            Where-Object { $_.FriendlyName -match 'Microsoft Hyper-V|HyperVMonitor|Microsoft Virtual Disk' })) {
-            $p = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($dev.InstanceId)"
-            if (Test-Path $p) {
-              Set-ItemProperty $p FriendlyName ($dev.FriendlyName -replace 'Microsoft Hyper-V ','') -Force -ErrorAction SilentlyContinue
-            }
-          }
-
-          # ---------- I. Misc ----------
-          try { Set-TimeZone -Id 'India Standard Time' -ErrorAction Stop } catch {}
-          [Environment]::SetEnvironmentVariable('SESSIONNAME','Console','Machine')
-          Stop-Service winmgmt -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
-          Start-Service winmgmt -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
-          Write-Host "=== Mask applied ===" -ForegroundColor Cyan
-
-      # ── STEP 0.6: VERIFY WHAT THE APP WILL SEE ────────────────────────
-      - name: 0.6 Verify Mask
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "========== WHAT KURO WILL SEE =========="
-          $cs = Get-CimInstance Win32_ComputerSystem
-          "ComputerSystem.Manufacturer : $($cs.Manufacturer)"
-          "ComputerSystem.Model        : $($cs.Model)"
-          "ComputerSystem.Name         : $($cs.Name)"
-          "HypervisorPresent           : $($cs.HypervisorPresent)"
-          "BIOS.Manufacturer           : $((Get-CimInstance Win32_BIOS).Manufacturer)"
-          "BIOS.SMBIOSBIOSVersion      : $((Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion)"
-          "BIOS.SerialNumber           : $((Get-CimInstance Win32_BIOS).SerialNumber)"
-          "BaseBoard.SerialNumber      : $((Get-CimInstance Win32_BaseBoard).SerialNumber)"
-          "Processor.Name              : $((Get-CimInstance Win32_Processor).Name)"
-          "VideoController.Name        : $((Get-CimInstance Win32_VideoController).Name)"
-          "DiskDrive.Model             : $((Get-CimInstance Win32_DiskDrive | Select-Object -First 1).Model)"
-          "SoundDevice                 : $((Get-CimInstance Win32_SoundDevice).Name)"
-          "MachineGuid                 : $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid)"
-          "ProductName (registry)      : $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').ProductName)"
-          "MAC addresses               : $((Get-NetAdapter | ForEach-Object { "$($_.Name)=$($_.MacAddress)" }) -join '; ')"
-          Write-Host "========================================"
-
-      # ── STEP 1: Show Session Info ──────────────────────────────────────
+      # ── STEP 1: Show Session Info ──────────────────────
       - name: 1. Show Session Info
         shell: pwsh
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          $ErrorActionPreference = 'Continue'
+          # 1. Setup AnyDesk Password and Fetch ID
           echo "GitHub@2026" | & "C:\AnyDesk\AnyDesk.exe" --set-password
           $idFile = "C:\ProgramData\AnyDesk\system.conf"
           $ID = ""
@@ -240,35 +80,40 @@ jobs:
             }
             Start-Sleep -Seconds 5
           }
-
+          
+          # 2. Start Bore Tunnel
           New-Item -Path "C:\GamingVM" -ItemType Directory -Force | Out-Null
           $outFile = "C:\GamingVM\bore_out.txt"
           $errFile = "C:\GamingVM\bore_err.txt"
-          "" | Set-Content $outFile
-          "" | Set-Content $errFile
+          
+          "" | Set-Content "C:\GamingVM\bore_out.txt"
+          "" | Set-Content "C:\GamingVM\bore_err.txt"
           Start-Process -FilePath "C:\bore.exe" `
             -ArgumentList "local 3389 --to bore.pub" `
-            -RedirectStandardOutput $outFile `
-            -RedirectStandardError  $errFile `
+            -RedirectStandardOutput "C:\GamingVM\bore_out.txt" `
+            -RedirectStandardError  "C:\GamingVM\bore_err.txt" `
             -WindowStyle Hidden -PassThru | Out-Null
-
+          
           $rdpPort = ""
           for ($i = 0; $i -lt 20; $i++) {
             Start-Sleep -Seconds 3
-            $text = "$(Get-Content $outFile -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $errFile -Raw -ErrorAction SilentlyContinue)"
-            $m = [regex]::Match($text, "bore\.pub:(\d+)")
-            if ($m.Success) { $rdpPort = $m.Groups[1].Value; break }
-            $m2 = [regex]::Match($text, "remote_port=(\d+)")
-            if ($m2.Success) { $rdpPort = $m2.Groups[1].Value; break }
+            $out  = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
+            $err  = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
+            $text = "$out`n$err"
+            $match = [regex]::Match($text, "bore\.pub:(\d+)")
+            if ($match.Success) { $rdpPort = $match.Groups[1].Value; break }
+            $match2 = [regex]::Match($text, "remote_port=(\d+)")
+            if ($match2.Success) { $rdpPort = $match2.Groups[1].Value; break }
           }
-
+          
           $rdpIP = ""
           try {
             $rdpIP = [System.Net.Dns]::GetHostAddresses("bore.pub") |
                      Where-Object { $_.AddressFamily -eq "InterNetwork" } |
                      Select-Object -First 1 -ExpandProperty IPAddressToString
           } catch { $rdpIP = "bore.pub" }
-
+          
+          # 3. Print the output. This step will now END here, allowing logs to display instantly.
           Write-Host "=========================================="
           Write-Host "  RUN NUMBER : $env:RUN_NUMBER"
           Write-Host "  ANYDESK ID : $ID"
@@ -279,15 +124,18 @@ jobs:
           Write-Host "  PASSWORD   : GitHub@2026"
           Write-Host "=========================================="
 
-      # ── STEP 2: Keep Alive (runs silently for ~6 hours) ────────────────
+      # ── STEP 2: Keep Alive (Runs silently for 6 hours) ──────
       - name: 2. Keep Alive
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $cutoff = [DateTime]::Now.AddHours(5).AddMinutes(55)
+          $cutoff  = [DateTime]::Now.AddHours(5).AddMinutes(55)
+          
           while ([DateTime]::Now -lt $cutoff) {
             Start-Sleep -Seconds 60
-            if (-not (Get-Process -Name bore -ErrorAction SilentlyContinue)) {
+            
+            # Restart bore silently in the background if it crashes
+            $boreProcess = Get-Process -Name bore -ErrorAction SilentlyContinue
+            if (-not $boreProcess) {
               "" | Set-Content "C:\GamingVM\bore_out.txt"
               "" | Set-Content "C:\GamingVM\bore_err.txt"
               Start-Process -FilePath "C:\bore.exe" `
